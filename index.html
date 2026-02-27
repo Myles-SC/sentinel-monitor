@@ -517,56 +517,136 @@ const errChart = new Chart(errCtx, {
 
 // ─── SERVICES ────────────────────────────────────────────
 const services = [
-  { name: 'API Gateway',   url: 'api.example.com',       status: 'up',   ping: 42,   uptime: '99.99%' },
-  { name: 'Auth Service',  url: 'auth.example.com',      status: 'up',   ping: 67,   uptime: '99.98%' },
-  { name: 'Web Frontend',  url: 'app.example.com',       status: 'up',   ping: 88,   uptime: '100%'   },
-  { name: 'DB Primary',    url: 'db-01.internal',        status: 'warn', ping: 310,  uptime: '99.81%' },
-  { name: 'Cache (Redis)', url: 'cache.internal',        status: 'up',   ping: 12,   uptime: '99.99%' },
-  { name: 'Workers',       url: 'workers.internal',      status: 'down', ping: null, uptime: '98.2%'  },
+  { name: 'ReadyCheck',    url: 'https://readycheck.paulsimps.com',      display: 'readycheck.paulsimps.com',      real: true,  status: 'checking', ping: null, uptime: '—',     checks: 0, up: 0 },
+  { name: 'API Gateway',   url: 'https://readycheck.paulsimps.com/api',  display: 'readycheck.paulsimps.com/api',  real: true,  status: 'checking', ping: null, uptime: '—',     checks: 0, up: 0 },
+  { name: 'Auth Service',  url: 'https://readycheck.paulsimps.com/auth', display: 'readycheck.paulsimps.com/auth', real: true,  status: 'checking', ping: null, uptime: '—',     checks: 0, up: 0 },
+  { name: 'DB Primary',    url: null,                                     display: 'db-01.internal',                real: false, status: 'warn',     ping: 310,  uptime: '99.81%', checks: 0, up: 0 },
+  { name: 'Cache (Redis)', url: null,                                     display: 'cache.internal',                real: false, status: 'up',       ping: 12,   uptime: '99.99%', checks: 0, up: 0 },
+  { name: 'Workers',       url: null,                                     display: 'workers.internal',              real: false, status: 'down',     ping: null, uptime: '98.2%',  checks: 0, up: 0 },
 ];
 
 function renderServices() {
   const el = document.getElementById('services');
-  el.innerHTML = services.map(s => `
-    <div class="service-item">
+  el.innerHTML = services.map((s, i) => {
+    const pingDisplay = s.status === 'checking'
+      ? '<span style="color:var(--muted);font-size:11px">pinging…</span>'
+      : (s.ping ? s.ping + 'ms' : '—');
+    const badgeClass = s.status === 'down' ? 'down' : s.status === 'warn' ? 'warn' : '';
+    return `
+    <div class="service-item" id="svc-${i}">
       <div class="service-left">
-        <div class="status-dot ${s.status}"></div>
+        <div class="status-dot ${s.status === 'checking' ? 'warn' : s.status}" id="dot-${i}"></div>
         <div>
           <div class="service-name">${s.name}</div>
-          <div class="service-url">${s.url}</div>
+          <div class="service-url">${s.display}</div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:12px">
         <div class="service-ping">
-          <div class="ping-val">${s.ping ? s.ping + 'ms' : '—'}</div>
+          <div class="ping-val" id="ping-${i}">${pingDisplay}</div>
           <div class="ping-label">latency</div>
         </div>
-        <div class="uptime-badge ${s.status === 'down' ? 'down' : s.status === 'warn' ? 'warn' : ''}">${s.uptime}</div>
+        <div class="uptime-badge ${badgeClass}" id="uptime-${i}">${s.uptime}</div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 renderServices();
 
-// ─── LOG ─────────────────────────────────────────────────
-const logMessages = [
-  { t: 'ok',   m: 'GET /api/v2/users → 200 (44ms)' },
-  { t: 'ok',   m: 'POST /api/v2/auth → 201 (67ms)' },
-  { t: 'warn', m: 'DB Primary response >300ms — threshold exceeded' },
-  { t: 'err',  m: 'Worker node #3 health check FAILED' },
-  { t: 'ok',   m: 'GET /api/v2/products → 200 (52ms)' },
-  { t: 'warn', m: 'Memory usage on app-02 at 78%' },
-  { t: 'ok',   m: 'SSL cert renewed successfully' },
-  { t: 'err',  m: 'Worker node #3 offline — alert triggered' },
-  { t: 'ok',   m: 'GET /api/v2/orders → 200 (38ms)' },
-  { t: 'ok',   m: 'Scheduled backup completed (2.3GB)' },
-];
+// ─── CLOUDFLARE WORKER PING ──────────────────────────────
+// 👇 Replace this URL after you deploy your worker
+const WORKER_URL = 'https://sentinel-monitor.myaltemail2-0.workers.dev';
 
+async function fetchFromWorker() {
+  try {
+    const res = await fetch(WORKER_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Worker returned ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    addLog({ t: 'err', m: `Worker unreachable: ${e.message}` });
+    return null;
+  }
+}
+
+function updateServiceRow(i, result) {
+  const s = services[i];
+  s.checks++;
+  if (result.ok) s.up++;
+  s.ping = result.ok ? result.latency : null;
+  s.status = !result.ok ? 'down' : result.latency > 800 ? 'warn' : 'up';
+  s.uptime = ((s.up / s.checks) * 100).toFixed(2) + '%';
+
+  const dot    = document.getElementById(`dot-${i}`);
+  const pingEl = document.getElementById(`ping-${i}`);
+  const uptimeEl = document.getElementById(`uptime-${i}`);
+  const svcItem  = document.getElementById(`svc-${i}`);
+
+  if (dot) dot.className = `status-dot ${s.status}`;
+  if (pingEl) pingEl.innerHTML = s.ping ? `${s.ping}ms` : '—';
+  if (uptimeEl) {
+    uptimeEl.textContent = s.uptime;
+    uptimeEl.className = `uptime-badge ${s.status === 'down' ? 'down' : s.status === 'warn' ? 'warn' : ''}`;
+  }
+  if (svcItem) svcItem.style.borderColor = s.status === 'up' ? '' : s.status === 'warn' ? 'var(--warn)' : 'var(--down)';
+
+  // Real status code in log
+  const statusLabel = result.status ? `HTTP ${result.status}` : 'UNREACHABLE';
+  addLog({
+    t: s.status === 'up' ? 'ok' : s.status === 'warn' ? 'warn' : 'err',
+    m: `${result.name} → ${statusLabel} (${s.ping ? s.ping + 'ms' : result.error || 'timeout'})`
+  });
+}
+
+async function pingAll() {
+  addLog({ t: 'ok', m: 'Running health checks via Cloudflare Worker…' });
+  const data = await fetchFromWorker();
+  if (!data) return;
+
+  // Match worker results to service rows by name
+  data.endpoints.forEach(result => {
+    const i = services.findIndex(s => s.name === result.name);
+    if (i !== -1) updateServiceRow(i, result);
+  });
+
+  // Update summary stats from worker response
+  const { avgLatency, up, total } = data.summary;
+  document.getElementById('avg-rt').innerHTML =
+    avgLatency + '<span style="font-size:16px;color:var(--muted)">ms</span>';
+  document.getElementById('alerts-count').textContent =
+    data.summary.down;
+
+  // Feed real latency into charts
+  rtData.shift();
+  rtData.push(clamp(avgLatency, 10, 2000));
+  rtChart.data.datasets[0].data = [...rtData];
+  rtChart.update('none');
+
+  const errRate = parseFloat(((data.summary.down / total) * 100).toFixed(2));
+  errData.shift();
+  errData.push(errRate);
+  errChart.data.datasets[0].data = [...errData];
+  errChart.data.datasets[0].backgroundColor = errData.map(v =>
+    v > 4 ? 'rgba(255,61,113,0.7)' : 'rgba(0,229,255,0.35)'
+  );
+  errChart.update('none');
+
+  // Overall uptime
+  const realServices = services.filter(s => s.real && s.checks > 0);
+  if (realServices.length) {
+    const avg = realServices.reduce((a, s) => a + (s.up / s.checks), 0) / realServices.length;
+    document.getElementById('uptime-pct').textContent = (avg * 100).toFixed(2) + '%';
+  }
+}
+
+// Run immediately then every 15 seconds
+pingAll();
+setInterval(pingAll, 15000);
+
+// ─── LOG ─────────────────────────────────────────────────
 let logIdx = 0;
 const logFeed = document.getElementById('log-feed');
 
-function addLog() {
-  const entry = logMessages[logIdx % logMessages.length];
+function addLog(entry) {
   logIdx++;
   const el = document.createElement('div');
   el.className = `log-entry ${entry.t}`;
@@ -577,9 +657,8 @@ function addLog() {
   document.getElementById('log-count').textContent = `${logFeed.children.length} events`;
 }
 
-// add initial logs
-for (let i = 0; i < 7; i++) addLog();
-setInterval(addLog, 3500);
+// Seed with a startup message
+addLog({ t: 'ok', m: 'SENTINEL started — running live checks on readycheck.paulsimps.com' });
 
 // ─── RESOURCE BARS ───────────────────────────────────────
 const resources = {
@@ -612,21 +691,7 @@ function updateResources() {
 Object.keys(resources).forEach(renderBars);
 setInterval(updateResources, 2500);
 
-// ─── LIVE CHART UPDATES ──────────────────────────────────
-setInterval(() => {
-  const newRt = clamp(rtData[rtData.length - 1] + randInt(-30, 30), 60, 380);
-  rtData.shift(); rtData.push(newRt);
-  rtChart.data.datasets[0].data = [...rtData];
-  rtChart.update('none');
-
-  const newErr = parseFloat(rand(0, 1.8).toFixed(2));
-  errData.shift(); errData.push(newErr);
-  errChart.data.datasets[0].data = [...errData];
-  errChart.data.datasets[0].backgroundColor = errData.map(v => v > 4 ? 'rgba(255,61,113,0.7)' : 'rgba(0,229,255,0.35)');
-  errChart.update('none');
-
-  document.getElementById('avg-rt').innerHTML = newRt + '<span style="font-size:16px;color:var(--muted)">ms</span>';
-}, 3000);
+// Charts are now updated by real ping results above
 </script>
 </body>
 </html>
